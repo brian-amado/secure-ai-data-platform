@@ -4,7 +4,14 @@ A portfolio project for building a secure enterprise data and AI platform on Azu
 
 The project will grow through documented steps across data ingestion and processing, AI and retrieval, Azure infrastructure, and security controls.
 
-## Repository map
+## Problem Statement
+
+Organizations want to use AI with internal data, but data can be scattered across sources, inconsistently prepared, and subject to access controls. A basic RAG demo may retrieve useful information without showing how data quality, authorization, and auditability are handled.
+
+This project will demonstrate an Azure-centered data platform that ingests and validates data, applies security and governance controls, and develops toward AI answers grounded in authorized sources with citations. Early examples will use public or synthetic data.
+
+
+## Repository Map
 
 - `architecture/` — system and data-flow design
 - `infrastructure/terraform/` — infrastructure as code
@@ -16,6 +23,6 @@ The project will grow through documented steps across data ingestion and process
 - `tests/` — automated checks
 
 
-## Current status
+## Current Status
 
 Repository foundation. See [CHANGELOG.md](CHANGELOG.md) for progress.
