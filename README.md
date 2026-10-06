@@ -26,3 +26,12 @@ This project will demonstrate an Azure-centered data platform that ingests and v
 ## Current Status
 
 Repository foundation. See [CHANGELOG.md](CHANGELOG.md) for progress.
+
+## Local Development
+
+Requires Python 3.13. From the repository root, create and activate the virtual environment:
+
+```bash
+python3.13 -m venv .venv
+source .venv/bin/activate
+```
