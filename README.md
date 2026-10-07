@@ -35,3 +35,10 @@ Requires Python 3.13. From the repository root, create and activate the virtual 
 python3.13 -m venv .venv
 source .venv/bin/activate
 ```
+
+Install the notebook tools and launch the walkthrough from the repository root:
+
+```bash
+python -m pip install -r requirements-dev.txt
+python -m notebook notebooks/wildchat_pipeline.ipynb
+```
