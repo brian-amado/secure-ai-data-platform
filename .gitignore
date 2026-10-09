@@ -10,3 +10,6 @@ __pycache__/
 
 # Local raw dataset files (may contain sensitive conversation text)
 /data/raw/
+
+# Local derived data may retain conversation text
+/data/processed/

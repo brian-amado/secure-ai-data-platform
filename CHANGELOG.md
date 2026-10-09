@@ -8,3 +8,4 @@
 - **Oct 5** — Selected WildChat converstaion dataset and scoped conversation-level usage categorization and reporting.
 - **Oct 6** — Set up the Python environment and Jupyter workflow; added the Hugging Face Bronze fetch script.
 - **Oct 7** — Successfully fetched a 100-row sample into local Bronze storage; added safe schema and conversation inspection to the notebook.
+- **Oct 8** — Added Silver validation and minimization for WildChat conversations, with a notebook step to run it.
