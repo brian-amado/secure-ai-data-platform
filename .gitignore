@@ -8,8 +8,6 @@ __pycache__/
 # Local environment variables and secrets
 .env
 
-# Local raw dataset files (may contain sensitive conversation text)
-/data/raw/
-
-# Local derived data may retain conversation text
-/data/processed/
+# Local Bronze and Silver data may contain conversation text
+/data/bronze/
+/data/silver/
