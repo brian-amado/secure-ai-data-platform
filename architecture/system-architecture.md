@@ -18,6 +18,8 @@ flowchart TD
 
 ## Design notes
 
+- The initial conversation-category analytics model is documented in [architecture README](README.md).
+
 - The ingestion script writes the original API response to Bronze. Raw CSV files can be uploaded directly to Bronze. Retain source and ingestion metadata for traceability.
 - Bronze, Silver, and Gold are logical layers. Their physical storage layout and Azure services remain undecided.
 - To execute the pipeline in separate Bronze/Silver/Gold scripts. The diagram separates the layers to show how data quality improves from raw input to consumer-ready output.

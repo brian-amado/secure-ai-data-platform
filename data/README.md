@@ -18,7 +18,7 @@ To pull usage catgorization/taxonomy.
 ## Initial development scope
 
 - Start with a small sample, about 1,000 conversations, for pipeline development.
-- Keep the sample in a local location excluded from Git.
+- Keep local samples under `data/bronze/` and `data/silver/`; both output folders are excluded from Git.
 - Before processing, review fields and decide which are needed.
 
 ## Data handling notes

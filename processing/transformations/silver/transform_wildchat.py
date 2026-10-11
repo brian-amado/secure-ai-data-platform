@@ -9,7 +9,7 @@ from pathlib import Path
 import sys
 from typing import Any
 
-DEFAULT_OUTPUT_DIR = Path("data/processed/silver/wildchat-1m/train")
+DEFAULT_OUTPUT_DIR = Path("data/silver/wildchat-1m/train")
 DATASET = "allenai/WildChat-1M"
 
 

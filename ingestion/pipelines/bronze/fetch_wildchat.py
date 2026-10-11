@@ -17,7 +17,7 @@ DATASET = "allenai/WildChat-1M"
 CONFIG = "default"
 SPLIT = "train"
 MAX_ROWS_PER_REQUEST = 100
-DEFAULT_OUTPUT_DIR = Path("data/raw/bronze/wildchat-1m/train")
+DEFAULT_OUTPUT_DIR = Path("data/bronze/wildchat-1m/train")
 
 
 def parse_args() -> argparse.Namespace:
