@@ -1,2 +1,3 @@
 ipykernel>=6,<8
 notebook>=7,<8
+openai>=2,<3

@@ -8,6 +8,7 @@ __pycache__/
 # Local environment variables and secrets
 .env
 
-# Local Bronze and Silver data may contain conversation text
+# Local data outputs may contain conversation text or derived classifications
 /data/bronze/
 /data/silver/
+/data/gold/
