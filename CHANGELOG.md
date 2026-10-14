@@ -10,3 +10,4 @@
 - **Oct 7** — Successfully fetched a 100-row sample into local Bronze storage; added safe schema and conversation inspection to the notebook.
 - **Oct 8** — Added Silver validation and minimization for WildChat conversations, with a notebook step to run it.
 - **Oct 10** — Simplified local data paths to `data/bronze/` and `data/silver/`; documented the conversation-category analytics model.
+- **Oct 13** — Added O*NET 31.0 Bronze ingestion and a deduplicated IWA catalog with a project-defined `OTHER` category.
