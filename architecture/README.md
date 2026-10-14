@@ -64,3 +64,9 @@ erDiagram
 For example, if conversation C1 includes coding and writing, it has two association rows. Count distinct `conversation_id` values per category. Category counts can overlap, so adding them may exceed the total number of conversations. This model counts whether a category appears in a conversation; it does **not** count how many times that kind of request occurred. Request-level counts would need a separate, finer-grained model.
 
 The Silver JSONL remains the conversation-level processing artifact. This relational model describes a later analytics-ready Gold output; the category taxonomy and classification method are still to be selected.
+
+## Classification taxonomy source
+
+The work-related classification options are the unique **Intermediate Work Activities (IWAs)** from the [O*NET 31.0 GWA-to-IWA-to-DWA crosswalk](https://www.onetcenter.org/dictionary/31.0/csv/gwas_to_iwas_to_dwas.html). The source file has six columns and 2,087 crosswalk rows; it maps each Detailed Work Activity to one IWA and its General Work Activity. The classifier catalog deduplicates by IWA identifier rather than treating each crosswalk row as a category.
+
+`OTHER` is a project-defined category for non-work-related conversations; it is not part of O*NET. A conversation can receive multiple IWA categories when it involves multiple work activities. A non-work conversation receives `OTHER`. Unclear or failed classifications should be marked for review instead of automatically mapped to `OTHER`.

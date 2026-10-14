@@ -27,4 +27,10 @@ The dataset contains public conversation text and metadata that is treated as se
 
 The first version should focus on validated, minimized data and aggregate reports. Raw conversation text is out of scope for the initial RAG index.
 
+## Reference taxonomy: O*NET work activities
+
+- Source: [O*NET 31.0 GWAs to IWAs to DWAs](https://www.onetcenter.org/dictionary/31.0/csv/gwas_to_iwas_to_dwas.html)
+- Bronze: preserve the downloaded CSV under `data/bronze/onet/31.0/`.
+- Silver: deduplicate the crosswalk to one record per IWA and add the project-defined `OTHER` non-work category under `data/silver/onet/31.0/`.
+- Do not commit downloaded source files or generated catalogs; the data layer folders are excluded from Git.
 
