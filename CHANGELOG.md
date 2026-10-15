@@ -11,3 +11,5 @@
 - **Oct 8** — Added Silver validation and minimization for WildChat conversations, with a notebook step to run it.
 - **Oct 10** — Simplified local data paths to `data/bronze/` and `data/silver/`; documented the conversation-category analytics model.
 - **Oct 13** — Added O*NET 31.0 Bronze ingestion and a deduplicated IWA catalog with a project-defined `OTHER` category.
+- **Oct 14** — Added a capped, explicit-run OpenAI classifier that writes Gold conversation-category associations and a review queue.
+- **Oct 15** — Switched classification to the OpenAI Decisions API, simplified Gold processing, and added multi-IWA scoring with safe error diagnostics.
