@@ -33,4 +33,4 @@ The first version should focus on validated, minimized data and aggregate report
 - Bronze: preserve the downloaded CSV under `data/bronze/onet/31.0/`.
 - Silver: deduplicate the crosswalk to one record per IWA and add the project-defined `OTHER` non-work category under `data/silver/onet/31.0/`.
 - Gold: classify Silver conversations into one or more IWAs; write one association record per conversation-category pair, with uncertain and failed cases in a separate review output.
-- Do not commit downloaded source files or generated catalogs; the data layer folders are excluded from Git.
+- The data layer folders are excluded from Git.

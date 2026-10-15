@@ -63,7 +63,7 @@ erDiagram
 
 For example, if conversation C1 includes coding and writing, it has two association rows. Count distinct `conversation_id` values per category. Category counts can overlap, so adding them may exceed the total number of conversations. This model counts whether a category appears in a conversation; it does **not** count how many times that kind of request occurred. Request-level counts would need a separate, finer-grained model.
 
-The Silver JSONL remains the conversation-level processing artifact. Gold classification writes one record per conversation-category pair and sends uncertain or failed classifications to a review output. The first classifier uses OpenAI's Responses API with Structured Outputs; it does not emit a confidence score because model-reported confidence is not calibrated here.
+The Silver JSONL remains the conversation-level processing artifact. Gold classification writes one record per conversation-category pair and sends uncertain or failed classifications to a review output. The first classifier uses OpenAI's Decisions API with predicate questions for multi-IWA assignment. Each Gold association stores the API's predicate probability as `confidence`; treat it as a model-reported signal, not a calibrated probability.
 
 ## Classification taxonomy source
 
