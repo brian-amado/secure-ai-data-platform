@@ -18,7 +18,7 @@ To pull usage catgorization/taxonomy.
 ## Initial development scope
 
 - Start with a small sample, about 1,000 conversations, for pipeline development.
-- Keep local samples under `data/bronze/`, `data/silver/`, and `data/gold/`; these data folders are excluded from Git.
+- Keep local samples under `data/bronze/`, `data/silver/`, and `data/gold/`; these data folders are excluded from Git. CSV inspection exports for all three Gold tables are under the ignored `data/exports/` directory.
 - Before processing, review fields and decide which are needed.
 
 ## Data handling notes
@@ -32,5 +32,6 @@ The first version should focus on validated, minimized data and aggregate report
 - Source: [O*NET 31.0 GWAs to IWAs to DWAs](https://www.onetcenter.org/dictionary/31.0/csv/gwas_to_iwas_to_dwas.html)
 - Bronze: preserve the downloaded CSV under `data/bronze/onet/31.0/`.
 - Silver: deduplicate the crosswalk to one record per IWA and add the project-defined `OTHER` non-work category under `data/silver/onet/31.0/`.
-- Gold: classify Silver conversations into one or more IWAs; write one association record per conversation-category pair, with uncertain and failed cases in a separate review output.
+- WildChat Silver: write one validated conversation per Parquet row, including nested messages; omit hashed IP, request headers, country, and state.
+- Gold: publish `conversations`, `categories`, and `conversation_categories` as separate Parquet tables, plus CSV inspection copies of each under `data/exports/`. Keep uncertain and failed cases in a separate review JSONL.
 - The data layer folders are excluded from Git.

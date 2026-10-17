@@ -6,17 +6,18 @@ The project will grow through documented steps across data ingestion and process
 
 ## Problem Statement
 
-Organizations want to use AI with internal data, but data can be scattered across sources, inconsistently prepared, and subject to access controls. A basic RAG demo may retrieve useful information without showing how data quality, authorization, and auditability are handled.
+Organizations are adopting generative AI, but leaders often lack a clear, privacy-conscious view of the kinds of work it supports. Conversation data is messy, sensitive, and difficult to summarize consistently, while individual messages may contain details that do not belong in routine reporting.
 
-This project will demonstrate an Azure-centered data platform that ingests and validates data, applies security and governance controls, and develops toward AI answers grounded in authorized sources with citations. Early examples will use public or synthetic data.
+This project uses the public WildChat dataset to demonstrate a secure data pipeline that validates and minimizes conversation records, classifies conversations into work-activity categories, and produces aggregate usage data. The first reports focus on how many conversations involve each category; a conversation may map to multiple categories. The platform is designed to grow toward Azure security controls and a permission-aware, citation-grounded interface for asking questions about those reports. Raw message text is used for classification, but excluded from the reporting tables.
 
 
 ## Repository Map
 
 - `architecture/` — system and data-flow design
 - `infrastructure/terraform/` — infrastructure as code
-- `ingestion/pipelines/` — data ingestion
-- `processing/transformations/` — data processing
+- `etl/bronze/` — source ingestion and immutable landing
+- `etl/silver/` — validation, minimization, and standardization
+- `etl/gold/` — classification and report-ready tables
 - `ai/` — AI and retrieval components
 - `security/` — identity and security controls
 - `monitoring/` — operational visibility
@@ -25,7 +26,7 @@ This project will demonstrate an Azure-centered data platform that ingests and v
 
 ## Current Status
 
-Repository foundation. See [CHANGELOG.md](CHANGELOG.md) for progress.
+Local prototype in progress: WildChat Bronze ingestion, Silver Parquet preparation, and Gold conversation-category modeling. Azure deployment and the reporting/RAG experience are future steps. See [CHANGELOG.md](CHANGELOG.md) for progress.
 
 ## Local Development
 

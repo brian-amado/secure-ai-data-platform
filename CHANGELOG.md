@@ -13,3 +13,4 @@
 - **Oct 13** — Added O*NET 31.0 Bronze ingestion and a deduplicated IWA catalog with a project-defined `OTHER` category.
 - **Oct 14** — Added a capped, explicit-run OpenAI classifier that writes Gold conversation-category associations and a review queue.
 - **Oct 15** — Switched classification to the OpenAI Decisions API, simplified Gold processing, and added multi-IWA scoring with safe error diagnostics.
+- **Oct 16** — Changed WildChat Silver to Parquet and modeled Gold as conversation, category, and conversation-category Parquet tables, with CSV exports for all three. Consolidated pipeline scripts under `etl/` and aligned the problem statement with conversation usage analytics.
