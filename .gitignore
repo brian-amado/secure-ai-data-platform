@@ -12,3 +12,4 @@ __pycache__/
 /data/bronze/
 /data/silver/
 /data/gold/
+/data/exports/
