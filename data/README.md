@@ -33,5 +33,5 @@ The first version should focus on validated, minimized data and aggregate report
 - Bronze: preserve the downloaded CSV under `data/bronze/onet/31.0/`.
 - Silver: deduplicate the crosswalk to one record per IWA and add the project-defined `OTHER` non-work category under `data/silver/onet/31.0/`.
 - WildChat Silver: write one validated conversation per Parquet row, including nested messages; omit hashed IP, request headers, country, and state.
-- Gold: publish `conversations`, `categories`, and `conversation_categories` as separate Parquet tables, plus CSV inspection copies of each under `data/exports/`. Keep uncertain and failed cases in a separate review JSONL.
+- Gold: publish `conversations`, `categories`, and `conversation_categories` as separate Parquet tables, plus CSV inspection copies of each under `data/exports/`. Keep uncertain and failed cases in a separate review JSONL. The notebook can calculate distinct classified-conversation counts by category directly from these Gold tables; it omits zero-count categories from the adjustable top-N view and does not persist a duplicate summary table.
 - The data layer folders are excluded from Git.
