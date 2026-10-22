@@ -93,11 +93,13 @@ def main() -> int:
         return 1
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    fetched_at = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    run_date = datetime.now(timezone.utc).strftime("%Y%m%d")
     output_path = args.output_dir / (
-        f"rows_offset_{args.offset:06d}_{fetched_at}.json"
+        f"rows_offset_{args.offset:06d}_length_{args.length:03d}_{run_date}.json"
     )
-    output_path.write_bytes(raw_response)
+    temporary_path = output_path.with_suffix(".json.tmp")
+    temporary_path.write_bytes(raw_response)
+    temporary_path.replace(output_path)
 
     print(f"Fetched {len(rows)} rows from {DATASET} ({SPLIT}, offset {args.offset}).")
     print(f"Saved raw API response to {output_path}.")

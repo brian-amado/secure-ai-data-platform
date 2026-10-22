@@ -15,3 +15,4 @@
 - **Oct 15** — Switched classification to the OpenAI Decisions API, simplified Gold processing, and added multi-IWA scoring with safe error diagnostics.
 - **Oct 16** — Changed WildChat Silver to Parquet and modeled Gold as conversation, category, and conversation-category Parquet tables, with CSV exports for all three. Consolidated pipeline scripts under `etl/` and aligned the problem statement with conversation usage analytics.
 - **Oct 20** — Added an adjustable top-N notebook view of distinct category counts calculated directly from the three Gold tables; zero-count categories are hidden.
+- **Oct 22** — Set the classifier to evaluate all 332 IWAs plus `OTHER` in one Decisions API request per conversation; made identical WildChat Bronze requests overwrite their same-day file; updated the notebook and architecture/data docs.
