@@ -20,6 +20,7 @@ To pull usage catgorization/taxonomy.
 - Start with a small sample, about 1,000 conversations, for pipeline development.
 - Keep local samples under `data/bronze/`, `data/silver/`, and `data/gold/`; these data folders are excluded from Git. CSV inspection exports for all three Gold tables are under the ignored `data/exports/` directory.
 - Before processing, review fields and decide which are needed.
+- WildChat Bronze filenames identify the row offset, requested length, and UTC date. Repeating the same request on the same UTC day overwrites that file; Bronze keeps the raw response bytes but does not retain a history of same-day reruns.
 
 ## Data handling notes
 
