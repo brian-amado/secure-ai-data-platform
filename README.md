@@ -15,7 +15,7 @@ This project uses the public WildChat dataset to demonstrate a secure data pipel
 
 - `architecture/` — system and data-flow design
 - `infrastructure/terraform/` — infrastructure as code
-- `etl/bronze/` — source ingestion and raw landing; identical WildChat requests overwrite within the same UTC day
+- `etl/bronze/` — source ingestion and raw landing; `fetch_wildchat.py` bulk-downloads and consolidates the published WildChat Parquet shards
 - `etl/silver/` — validation, minimization, and standardization
 - `etl/gold/` — classification and report-ready tables
 - `ai/` — AI and retrieval components

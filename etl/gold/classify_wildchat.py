@@ -66,14 +66,56 @@ def load_categories(path: Path) -> dict[str, dict[str, str]]:
     return categories
 
 
-def load_conversations(path: Path) -> list[dict[str, Any]]:
-    rows = pq.read_table(path).to_pylist()
-    if not rows:
+def load_conversations(path: Path, limit: int) -> list[dict[str, Any]]:
+    parquet = pq.ParquetFile(path)
+    if parquet.metadata.num_rows == 0:
         raise ValueError("The Silver file contains no conversations.")
+    batches = parquet.iter_batches(batch_size=limit, columns=["conversation_id", "messages"])
+    rows = next(batches).to_pylist()
     for index, row in enumerate(rows, start=1):
         if not row.get("conversation_id") or not row.get("messages"):
             raise ValueError(f"Silver record {index} is missing an ID or messages.")
     return rows
+
+
+def write_conversations(
+    source: Path, parquet_path: Path, csv_path: Path, statuses: dict[str, str]
+) -> int:
+    """Stream the full Silver batch into one Gold conversation table and CSV export."""
+    parquet_path.parent.mkdir(parents=True, exist_ok=True)
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    parquet_tmp = parquet_path.with_suffix(parquet_path.suffix + ".tmp")
+    csv_tmp = csv_path.with_suffix(csv_path.suffix + ".tmp")
+    source_columns = [name for name in CONVERSATION_SCHEMA.names if name != "classification_status"]
+    writer = None
+    count = 0
+    try:
+        with csv_tmp.open("w", encoding="utf-8", newline="") as csv_file:
+            csv_writer = csv.DictWriter(csv_file, fieldnames=CONVERSATION_SCHEMA.names)
+            csv_writer.writeheader()
+            for batch in pq.ParquetFile(source).iter_batches(columns=source_columns, batch_size=5000):
+                rows = batch.to_pylist()
+                for row in rows:
+                    row["classification_status"] = statuses.get(row["conversation_id"], "pending")
+                table = pa.Table.from_pylist(rows, schema=CONVERSATION_SCHEMA)
+                if writer is None:
+                    writer = pq.ParquetWriter(parquet_tmp, CONVERSATION_SCHEMA, compression="snappy")
+                writer.write_table(table)
+                csv_writer.writerows(rows)
+                count += len(rows)
+        if writer is None:
+            raise ValueError("The Silver file contains no conversations.")
+        writer.close()
+        writer = None
+        parquet_tmp.replace(parquet_path)
+        csv_tmp.replace(csv_path)
+    except Exception:
+        if writer is not None:
+            writer.close()
+        parquet_tmp.unlink(missing_ok=True)
+        csv_tmp.unlink(missing_ok=True)
+        raise
+    return count
 
 
 def classify(client: Any, conversation: dict[str, Any], categories: dict[str, dict[str, str]]) -> list[tuple[str, float]] | None:
@@ -162,7 +204,7 @@ def main() -> int:
         return 2
     try:
         categories = load_categories(args.categories)
-        conversations = load_conversations(args.silver_file)
+        conversations = load_conversations(args.silver_file, args.limit)
     except (OSError, ValueError, KeyError, pa.ArrowException) as error:
         print(f"Input error: {error}", file=sys.stderr)
         return 2
@@ -220,11 +262,9 @@ def main() -> int:
             failed = True
             break
 
-    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    # Use the Silver input name as the stable batch key. Re-running classification
+    # for the same Silver batch replaces its Gold files instead of creating another set.
     stem = args.silver_file.stem.removeprefix("silver_")
-    conversations_out = [{
-        key: row.get(key) for key in CONVERSATION_SCHEMA.names if key != "classification_status"
-    } | {"classification_status": statuses[row["conversation_id"]]} for row in conversations]
     categories_out = [{
         "category_id": category_id,
         "taxonomy_version": row.get("taxonomy_version", ""),
@@ -236,28 +276,30 @@ def main() -> int:
         "taxonomy_source": row.get("taxonomy_source", ""),
     } for category_id, row in categories.items()]
     paths = {
-        "conversations": args.output_dir / f"conversations_{stem}_{run_id}.parquet",
-        "categories": args.output_dir / f"categories_{run_id}.parquet",
-        "conversation_categories": args.output_dir / f"conversation_categories_{stem}_{run_id}.parquet",
-        "conversations_csv": args.export_dir / f"conversations_{stem}_{run_id}.csv",
-        "categories_csv": args.export_dir / f"categories_{run_id}.csv",
-        "conversation_categories_csv": args.export_dir / f"conversation_categories_{stem}_{run_id}.csv",
+        "conversations": args.output_dir / f"conversations_{stem}.parquet",
+        "categories": args.output_dir / f"categories_{stem}.parquet",
+        "conversation_categories": args.output_dir / f"conversation_categories_{stem}.parquet",
+        "conversations_csv": args.export_dir / f"conversations_{stem}.csv",
+        "categories_csv": args.export_dir / f"categories_{stem}.csv",
+        "conversation_categories_csv": args.export_dir / f"conversation_categories_{stem}.csv",
     }
-    write_parquet(paths["conversations"], conversations_out, CONVERSATION_SCHEMA)
+    conversation_count = write_conversations(
+        args.silver_file, paths["conversations"], paths["conversations_csv"], statuses
+    )
     write_parquet(paths["categories"], categories_out, CATEGORY_SCHEMA)
     write_parquet(paths["conversation_categories"], associations, ASSOCIATION_SCHEMA)
-    write_csv(paths["conversations_csv"], conversations_out, CONVERSATION_SCHEMA.names)
     write_csv(paths["categories_csv"], categories_out, CATEGORY_SCHEMA.names)
     write_association_csv(paths["conversation_categories_csv"], associations, categories)
-    review_path = args.output_dir / f"classification_reviews_{stem}_{run_id}.jsonl"
+    review_path = args.output_dir / f"classification_reviews_{stem}.jsonl"
     with review_path.open("w", encoding="utf-8") as file:
         for review in reviews:
             file.write(json.dumps(review, ensure_ascii=False) + "\n")
     for name, path in paths.items():
         rows = len(associations) if name.startswith("conversation_categories") else (
-            len(categories_out) if name.startswith("categories") else len(conversations_out)
+            len(categories_out) if name.startswith("categories") else conversation_count
         )
         print(f"Gold {name}: {path} ({rows} rows)")
+    print(f"Gold batch: {stem}; classified at {run_time}")
     print(f"Review queue: {review_path} ({len(reviews)} rows)")
     return int(failed)
 
