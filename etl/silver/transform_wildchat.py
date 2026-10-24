@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import sys
@@ -35,7 +36,7 @@ SCHEMA = pa.schema([
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("bronze_file", type=Path, help="Path to a saved Bronze API response JSON file.")
+    parser.add_argument("bronze_file", type=Path, help="Path to a Bronze API response JSON or JSONL batch.")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     return parser.parse_args()
 
@@ -54,10 +55,17 @@ def validate_record(item: Any) -> tuple[dict[str, Any] | None, list[str]]:
     conversation_hash = source.get("conversation_hash")
     if not isinstance(conversation_hash, str) or not conversation_hash.strip():
         errors.append("conversation_hash is missing or invalid")
-    for field in ("model", "timestamp", "language"):
+    for field in ("model", "language"):
         value = source.get(field)
         if not isinstance(value, str) or not value.strip():
             errors.append(f"{field} is missing or invalid")
+    timestamp = source.get("timestamp")
+    if isinstance(timestamp, datetime):
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        timestamp = timestamp.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    elif not isinstance(timestamp, str) or not timestamp.strip():
+        errors.append("timestamp is missing or invalid")
     turn_count = source.get("turn")
     if type(turn_count) is not int or turn_count < 0:
         errors.append("turn is missing or invalid")
@@ -100,7 +108,7 @@ def validate_record(item: Any) -> tuple[dict[str, Any] | None, list[str]]:
         "source_row_index": row_index,
         "dataset": DATASET,
         "model": source["model"],
-        "timestamp": source["timestamp"],
+        "timestamp": timestamp,
         "turn_count": turn_count,
         "language": source["language"],
         "toxic": source["toxic"],
@@ -109,40 +117,78 @@ def validate_record(item: Any) -> tuple[dict[str, Any] | None, list[str]]:
     }, []
 
 
+def iter_bronze_rows(path: Path):
+    """Yield source rows from Parquet or legacy API response files."""
+    if path.suffix == ".parquet":
+        parquet = pq.ParquetFile(path)
+        row_index = 0
+        for batch in parquet.iter_batches(batch_size=500):
+            for row in batch.to_pylist():
+                yield {"row_idx": row_index, "row": row}
+                row_index += 1
+    elif path.suffix == ".jsonl":
+        with path.open(encoding="utf-8") as source:
+            for line_number, line in enumerate(source, start=1):
+                if not line.strip():
+                    continue
+                payload = json.loads(line)
+                if not isinstance(payload, dict) or not isinstance(payload.get("rows"), list):
+                    raise ValueError(f"Bronze JSONL line {line_number} has no rows list.")
+                yield from payload["rows"]
+    else:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict) or not isinstance(payload.get("rows"), list):
+            raise ValueError("Bronze input must contain a rows list.")
+        yield from payload["rows"]
+
+
 def main() -> int:
     args = parse_args()
-    try:
-        payload = json.loads(args.bronze_file.read_text(encoding="utf-8"))
-    except OSError as error:
-        print(f"Could not read Bronze input: {error}", file=sys.stderr)
-        return 1
-    except json.JSONDecodeError:
-        print("Bronze input is not valid JSON.", file=sys.stderr)
-        return 1
-    if not isinstance(payload, dict) or not isinstance(payload.get("rows"), list):
-        print("Bronze input must contain a rows list.", file=sys.stderr)
-        return 1
-    records: list[dict[str, Any]] = []
-    rejected: Counter[str] = Counter()
-    for item in payload["rows"]:
-        normalized, errors = validate_record(item)
-        if normalized is None:
-            rejected.update(errors)
-        else:
-            records.append(normalized)
-    if not records:
-        print("No valid conversations found; no Silver output was written.", file=sys.stderr)
-        for reason, count in sorted(rejected.items()):
-            print(f"  {reason}: {count}", file=sys.stderr)
-        return 1
     args.output_dir.mkdir(parents=True, exist_ok=True)
     output = args.output_dir / f"silver_{args.bronze_file.stem}.parquet"
     temporary = output.with_suffix(".parquet.tmp")
-    pq.write_table(pa.Table.from_pylist(records, schema=SCHEMA), temporary, compression="snappy")
-    temporary.replace(output)
-    print(f"Bronze rows received: {len(payload['rows'])}")
-    print(f"Silver conversations written: {len(records)}")
-    print(f"Rows rejected: {len(payload['rows']) - len(records)}")
+    rejected: Counter[str] = Counter()
+    writer = None
+    received = written = 0
+    batch: list[dict[str, Any]] = []
+    try:
+        for item in iter_bronze_rows(args.bronze_file):
+            received += 1
+            normalized, errors = validate_record(item)
+            if normalized is None:
+                rejected.update(errors)
+                continue
+            batch.append(normalized)
+            if len(batch) >= 500:
+                table = pa.Table.from_pylist(batch, schema=SCHEMA)
+                if writer is None:
+                    writer = pq.ParquetWriter(temporary, SCHEMA, compression="snappy")
+                writer.write_table(table)
+                written += len(batch)
+                batch.clear()
+        if batch:
+            table = pa.Table.from_pylist(batch, schema=SCHEMA)
+            if writer is None:
+                writer = pq.ParquetWriter(temporary, SCHEMA, compression="snappy")
+            writer.write_table(table)
+            written += len(batch)
+        if writer is None:
+            print("No valid conversations found; no Silver output was written.", file=sys.stderr)
+            for reason, count in sorted(rejected.items()):
+                print(f"  {reason}: {count}", file=sys.stderr)
+            return 1
+        writer.close()
+        writer = None
+        temporary.replace(output)
+    except (OSError, json.JSONDecodeError, ValueError, pa.ArrowException) as error:
+        if writer is not None:
+            writer.close()
+        temporary.unlink(missing_ok=True)
+        print(f"Silver transformation failed: {error}", file=sys.stderr)
+        return 1
+    print(f"Bronze rows received: {received}")
+    print(f"Silver conversations written: {written}")
+    print(f"Rows rejected: {received - written}")
     print(f"Silver Parquet: {output}")
     print("Removed from Silver: hashed IP, request headers, country, and state.")
     return 0

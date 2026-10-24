@@ -1,108 +1,80 @@
-"""Fetch one page from the public WildChat dataset into the local Bronze layer."""
+"""Bulk-download WildChat's published Parquet shards into one Bronze file."""
 
 from __future__ import annotations
 
 import argparse
+import shutil
 from datetime import datetime, timezone
-import json
 from pathlib import Path
 import sys
-from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
 
+import pyarrow.parquet as pq
+from huggingface_hub import snapshot_download
 
-API_URL = "https://datasets-server.huggingface.co/rows"
 DATASET = "allenai/WildChat-1M"
-CONFIG = "default"
 SPLIT = "train"
-MAX_ROWS_PER_REQUEST = 100
 DEFAULT_OUTPUT_DIR = Path("data/bronze/wildchat-1m/train")
+DOWNLOAD_WORKERS = 8
+BATCH_SIZE = 5_000
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Fetch one page of WildChat rows into local Bronze storage."
-    )
-    parser.add_argument(
-        "--offset",
-        type=int,
-        default=0,
-        help="Zero-based row offset to request (default: 0).",
-    )
-    parser.add_argument(
-        "--length",
-        type=int,
-        default=100,
-        help="Rows to request, from 1 to 100 (default: 100).",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=DEFAULT_OUTPUT_DIR,
-        help=f"Local output directory (default: {DEFAULT_OUTPUT_DIR}).",
-    )
-    args = parser.parse_args()
-
-    if args.offset < 0:
-        parser.error("--offset must be zero or greater")
-    if not 1 <= args.length <= MAX_ROWS_PER_REQUEST:
-        parser.error(f"--length must be between 1 and {MAX_ROWS_PER_REQUEST}")
-
-    return args
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    query = urlencode(
-        {
-            "dataset": DATASET,
-            "config": CONFIG,
-            "split": SPLIT,
-            "offset": args.offset,
-            "length": args.length,
-        }
-    )
-    request = Request(
-        f"{API_URL}?{query}",
-        headers={"User-Agent": "secure-ai-data-platform/0.1"},
-    )
-
-    try:
-        with urlopen(request, timeout=30) as response:
-            raw_response = response.read()
-    except HTTPError as error:
-        print(f"Hugging Face API returned HTTP {error.code}.", file=sys.stderr)
-        return 1
-    except (TimeoutError, URLError) as error:
-        print(f"Could not reach the Hugging Face API: {error}", file=sys.stderr)
-        return 1
-
-    try:
-        payload = json.loads(raw_response)
-    except json.JSONDecodeError:
-        print("Hugging Face API returned invalid JSON.", file=sys.stderr)
-        return 1
-
-    rows = payload.get("rows")
-    if not isinstance(rows, list):
-        print("Hugging Face API response did not contain a rows list.", file=sys.stderr)
-        return 1
-    if len(rows) > args.length:
-        print("Hugging Face API returned more rows than requested.", file=sys.stderr)
-        return 1
-
     args.output_dir.mkdir(parents=True, exist_ok=True)
     run_date = datetime.now(timezone.utc).strftime("%Y%m%d")
-    output_path = args.output_dir / (
-        f"rows_offset_{args.offset:06d}_length_{args.length:03d}_{run_date}.json"
-    )
-    temporary_path = output_path.with_suffix(".json.tmp")
-    temporary_path.write_bytes(raw_response)
-    temporary_path.replace(output_path)
+    output = args.output_dir / f"wildchat_train_{run_date}.parquet"
+    temporary = output.with_suffix(".parquet.tmp")
+    writer = None
+    output_schema = None
+    row_count = 0
 
-    print(f"Fetched {len(rows)} rows from {DATASET} ({SPLIT}, offset {args.offset}).")
-    print(f"Saved raw API response to {output_path}.")
+    try:
+        snapshot = Path(snapshot_download(
+            repo_id=DATASET,
+            repo_type="dataset",
+            allow_patterns=[f"data/{SPLIT}-*.parquet"],
+            max_workers=DOWNLOAD_WORKERS,
+        ))
+        shards = sorted((snapshot / "data").glob(f"{SPLIT}-*.parquet"))
+        if not shards:
+            raise RuntimeError("Hugging Face returned no WildChat train Parquet shards.")
+
+        for shard in shards:
+            parquet = pq.ParquetFile(shard)
+            if writer is None:
+                output_schema = parquet.schema_arrow
+                writer = pq.ParquetWriter(temporary, output_schema, compression="snappy")
+            elif not parquet.schema_arrow.equals(output_schema):
+                raise ValueError(f"Parquet schema differs in shard {shard.name}.")
+            for batch in parquet.iter_batches(batch_size=BATCH_SIZE):
+                writer.write_batch(batch)
+                row_count += batch.num_rows
+        writer.close()
+        writer = None
+        if row_count == 0:
+            raise ValueError("Downloaded WildChat train split was empty.")
+        temporary.replace(output)
+        # Remove obsolete per-page checkpoints left by the former /rows ingestion.
+        shutil.rmtree(args.output_dir / ".staging", ignore_errors=True)
+    except Exception as error:
+        if writer is not None:
+            writer.close()
+        temporary.unlink(missing_ok=True)
+        print(f"WildChat bulk Bronze download failed: {error}", file=sys.stderr)
+        return 1
+
+    print(f"Dataset: {DATASET} ({SPLIT})")
+    print(f"Dataset revision: {snapshot.name}")
+    print(f"Parquet source shards: {len(shards)}")
+    print(f"Rows downloaded: {row_count}")
+    print(f"Bronze Parquet: {output}")
+    print(f"Bronze file for downstream notebook steps: {output}")
     return 0
 
 

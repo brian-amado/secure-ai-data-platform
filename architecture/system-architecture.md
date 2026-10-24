@@ -21,7 +21,8 @@ flowchart TD
 - The initial conversation-category analytics model is documented in [architecture README](README.md).
 
 - The ingestion script writes the original API response to Bronze. Raw CSV files can be uploaded directly to Bronze.
-- The local WildChat Bronze filename includes the row offset, requested length, and UTC date; rerunning the identical request on the same UTC day replaces that file. The raw response is preserved as received, but same-day rerun history is not retained.
+- The local WildChat Bronze filename includes the row offset, requested length, and UTC date. A single-page rerun on the same UTC day replaces its file; full-split `--all --resume` skips pages saved that day, while a fresh `--all` refreshes them. The raw response is preserved as received, but historical reruns are not retained.
+- The Hugging Face `/rows` endpoint allows at most 100 rows per request, so fetching the full split requires pagination.
 - Bronze, Silver, and Gold are logical layers. Their physical storage layout and Azure services remain undecided.
 - To execute the pipeline in separate Bronze/Silver/Gold scripts. The diagram separates the layers to show how data quality improves from raw input to consumer-ready output.
 - To retrieve the credential from a secure store. An Azure-hosted workload can use a managed identity with only the storage permissions it needs.
