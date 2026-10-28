@@ -17,6 +17,7 @@ DEFAULT_OUTPUT_DIR = Path("data/silver/wildchat-1m/train")
 DATASET = "allenai/WildChat-1M"
 SCHEMA = pa.schema([
     ("conversation_id", pa.string()),
+    ("conversation_hash", pa.string()),
     ("source_row_index", pa.int64()),
     ("dataset", pa.string()),
     ("model", pa.string()),
@@ -76,6 +77,13 @@ def validate_record(item: Any) -> tuple[dict[str, Any] | None, list[str]]:
     if not isinstance(source_messages, list) or not source_messages:
         errors.append("conversation is missing or empty")
         source_messages = []
+    first_turn_identifier = (
+        source_messages[0].get("turn_identifier")
+        if source_messages and isinstance(source_messages[0], dict)
+        else None
+    )
+    if type(first_turn_identifier) is not int:
+        errors.append("first turn_identifier is missing or invalid")
     for message in source_messages:
         if not isinstance(message, dict):
             errors.append("conversation contains a non-object message")
@@ -104,7 +112,10 @@ def validate_record(item: Any) -> tuple[dict[str, Any] | None, list[str]]:
     ]
     # Deliberately omit hashed_ip, request headers, country, and state.
     return {
-        "conversation_id": conversation_hash,
+        # turn_identifier is a turn-grain identifier; the first turn's value
+        # uniquely identifies this conversation instance in the source snapshot.
+        "conversation_id": str(first_turn_identifier),
+        "conversation_hash": conversation_hash,
         "source_row_index": row_index,
         "dataset": DATASET,
         "model": source["model"],
@@ -150,6 +161,7 @@ def main() -> int:
     rejected: Counter[str] = Counter()
     writer = None
     received = written = 0
+    seen_conversation_ids: set[str] = set()
     batch: list[dict[str, Any]] = []
     try:
         for item in iter_bronze_rows(args.bronze_file):
@@ -158,6 +170,10 @@ def main() -> int:
             if normalized is None:
                 rejected.update(errors)
                 continue
+            conversation_id = normalized["conversation_id"]
+            if conversation_id in seen_conversation_ids:
+                raise ValueError(f"Duplicate conversation_id from first turn_identifier: {conversation_id}")
+            seen_conversation_ids.add(conversation_id)
             batch.append(normalized)
             if len(batch) >= 500:
                 table = pa.Table.from_pylist(batch, schema=SCHEMA)

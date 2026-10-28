@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import argparse
 import csv
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import random
 import sys
+from threading import local
 from typing import Any
 
 import pyarrow as pa
@@ -19,13 +22,15 @@ DEFAULT_OUTPUT_DIR = Path("data/gold/wildchat-1m/train")
 DEFAULT_EXPORT_DIR = Path("data/exports")
 MODEL = "gpt-6-luna"
 MAX_QUESTIONS = 333
+MAX_CLASSIFICATION_SAMPLE = 1000
+MAX_CLASSIFICATION_WORKERS = 10
 IWA_THRESHOLD = 0.5
 OTHER_THRESHOLD = 0.8
 PROMPT_VERSION = "1.1"
 
 CONVERSATION_SCHEMA = pa.schema([
-    ("conversation_id", pa.string()), ("source_row_index", pa.int64()),
-    ("dataset", pa.string()), ("timestamp", pa.string()), ("model", pa.string()),
+    ("conversation_id", pa.string()), ("conversation_hash", pa.string()),
+    ("source_row_index", pa.int64()), ("dataset", pa.string()), ("timestamp", pa.string()), ("model", pa.string()),
     ("language", pa.string()), ("turn_count", pa.int64()), ("toxic", pa.bool_()),
     ("redacted", pa.bool_()), ("classification_status", pa.string()),
 ])
@@ -49,7 +54,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--categories", type=Path, default=DEFAULT_CATALOG)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--export-dir", type=Path, default=DEFAULT_EXPORT_DIR)
-    parser.add_argument("--limit", type=int, default=1, help="Conversations to classify (1–100)")
+    parser.add_argument(
+        "--limit", type=int, default=1,
+        help=f"Random conversations to classify (1–{MAX_CLASSIFICATION_SAMPLE})",
+    )
+    parser.add_argument("--sample-seed", type=int, default=42, help="Seed for reproducible random sampling")
+    parser.add_argument(
+        "--workers", type=int, default=5,
+        help=f"Concurrent Decisions API requests (1–{MAX_CLASSIFICATION_WORKERS}; default: 5)",
+    )
     parser.add_argument("--model", default=os.getenv("OPENAI_MODEL", MODEL))
     parser.add_argument("--execute", action="store_true", help="Send text to the Decisions API")
     return parser.parse_args()
@@ -66,16 +79,37 @@ def load_categories(path: Path) -> dict[str, dict[str, str]]:
     return categories
 
 
-def load_conversations(path: Path, limit: int) -> list[dict[str, Any]]:
+def load_conversations(path: Path, limit: int, seed: int) -> tuple[list[dict[str, Any]], int]:
+    """Read a reproducible random sample from Silver, loading only selected Parquet row groups."""
     parquet = pq.ParquetFile(path)
-    if parquet.metadata.num_rows == 0:
+    total_rows = parquet.metadata.num_rows
+    if total_rows == 0:
         raise ValueError("The Silver file contains no conversations.")
-    batches = parquet.iter_batches(batch_size=limit, columns=["conversation_id", "messages"])
-    rows = next(batches).to_pylist()
+    if limit > total_rows:
+        raise ValueError(f"Sample size {limit} exceeds the {total_rows} Silver conversations.")
+
+    selected_indexes = sorted(random.Random(seed).sample(range(total_rows), limit))
+    rows: list[dict[str, Any]] = []
+    sample_position = 0
+    row_offset = 0
+    for group_index in range(parquet.metadata.num_row_groups):
+        group_rows = parquet.metadata.row_group(group_index).num_rows
+        group_end = row_offset + group_rows
+        local_indexes = []
+        while sample_position < len(selected_indexes) and selected_indexes[sample_position] < group_end:
+            local_indexes.append(selected_indexes[sample_position] - row_offset)
+            sample_position += 1
+        if local_indexes:
+            group = parquet.read_row_group(group_index, columns=["conversation_id", "messages"])
+            rows.extend(group.take(pa.array(local_indexes, type=pa.int64())).to_pylist())
+        row_offset = group_end
+
+    if len(rows) != limit:
+        raise ValueError(f"Selected {len(rows)} conversations, expected {limit}.")
     for index, row in enumerate(rows, start=1):
         if not row.get("conversation_id") or not row.get("messages"):
-            raise ValueError(f"Silver record {index} is missing an ID or messages.")
-    return rows
+            raise ValueError(f"Sampled Silver record {index} is missing an ID or messages.")
+    return rows, total_rows
 
 
 def write_conversations(
@@ -193,8 +227,11 @@ def write_csv(path: Path, rows: list[dict[str, Any]], fields: list[str]) -> None
 
 def main() -> int:
     args = parse_args()
-    if not 1 <= args.limit <= 100:
-        print("--limit must be between 1 and 100.", file=sys.stderr)
+    if not 1 <= args.limit <= MAX_CLASSIFICATION_SAMPLE:
+        print(f"--limit must be between 1 and {MAX_CLASSIFICATION_SAMPLE}.", file=sys.stderr)
+        return 2
+    if not 1 <= args.workers <= MAX_CLASSIFICATION_WORKERS:
+        print(f"--workers must be between 1 and {MAX_CLASSIFICATION_WORKERS}.", file=sys.stderr)
         return 2
     if args.model != MODEL:
         print(f"The Decisions API currently supports only {MODEL}.", file=sys.stderr)
@@ -204,11 +241,12 @@ def main() -> int:
         return 2
     try:
         categories = load_categories(args.categories)
-        conversations = load_conversations(args.silver_file, args.limit)
+        conversations, total_rows = load_conversations(args.silver_file, args.limit, args.sample_seed)
     except (OSError, ValueError, KeyError, pa.ArrowException) as error:
         print(f"Input error: {error}", file=sys.stderr)
         return 2
-    print(f"Ready: {len(conversations)} conversation(s), "
+    print(f"Ready: {len(conversations)} random conversation(s) from {total_rows} Silver rows "
+          f"(seed {args.sample_seed}); "
           f"{sum(row['category_type'] == 'onet_iwa' for row in categories.values())} IWAs.")
     if not args.execute:
         print("Dry run: no API request made. Add --execute to classify.")
@@ -219,33 +257,21 @@ def main() -> int:
         print("Install dependencies with: pip install -r requirements-dev.txt", file=sys.stderr)
         return 2
 
-    client = OpenAI()
     selected = conversations[:args.limit]
     associations: list[dict[str, Any]] = []
     reviews: list[dict[str, Any]] = []
     statuses = {row["conversation_id"]: "pending" for row in conversations}
     run_time = datetime.now(timezone.utc).isoformat()
-    failed = False
-    for index, conversation in enumerate(selected):
-        conversation_id = conversation["conversation_id"]
+    worker_state = local()
+
+    def classify_one(index: int, conversation: dict[str, Any]) -> tuple[int, list[tuple[str, float]] | None, dict[str, Any] | None]:
+        """Run one conversation request with a client dedicated to this worker thread."""
         try:
-            matches = classify(client, conversation, categories)
-            if matches is None:
-                statuses[conversation_id] = "review_required"
-                reviews.append({"conversation_id": conversation_id, "reason": "uncertain"})
-                continue
-            statuses[conversation_id] = "classified"
-            for category_id, confidence in matches:
-                associations.append({
-                    "conversation_id": conversation_id,
-                    "category_id": category_id,
-                    "taxonomy_version": categories[category_id].get("taxonomy_version", ""),
-                    "classification_method": "openai_decisions",
-                    "confidence": confidence,
-                    "model": MODEL,
-                    "prompt_version": PROMPT_VERSION,
-                    "classified_at": run_time,
-                })
+            client = getattr(worker_state, "client", None)
+            if client is None:
+                client = OpenAI()
+                worker_state.client = client
+            return index, classify(client, conversation, categories), None
         except Exception as error:
             details = {key: value for key, value in {
                 "error_type": type(error).__name__,
@@ -253,14 +279,59 @@ def main() -> int:
                 "error_code": getattr(error, "code", None),
                 "request_id": getattr(error, "request_id", None),
             }.items() if value is not None}
-            print(f"Decisions API failed: {details}", file=sys.stderr)
+            return index, None, details
+
+    # Keep concurrency bounded: each task sends one paid Decisions API request.
+    results: list[tuple[list[tuple[str, float]] | None, dict[str, Any] | None] | None] = [None] * len(selected)
+    with ThreadPoolExecutor(max_workers=args.workers) as executor:
+        futures = {
+            executor.submit(classify_one, index, conversation): index
+            for index, conversation in enumerate(selected)
+        }
+        stop_queued_work = False
+        for future in as_completed(futures):
+            index = futures[future]
+            if future.cancelled():
+                continue
+            result_index, matches, error_details = future.result()
+            results[result_index] = (matches, error_details)
+            if error_details and not stop_queued_work:
+                stop_queued_work = True
+                for queued in futures:
+                    if queued is not future:
+                        queued.cancel()
+
+    failed = False
+    for index, conversation in enumerate(selected):
+        conversation_id = conversation["conversation_id"]
+        result = results[index]
+        if result is None:
+            statuses[conversation_id] = "not_attempted"
+            reviews.append({"conversation_id": conversation_id, "reason": "not_attempted"})
+            continue
+        matches, error_details = result
+        if error_details is not None:
+            print(f"Decisions API failed: {error_details}", file=sys.stderr)
             statuses[conversation_id] = "failed"
-            reviews.append({"conversation_id": conversation_id, "reason": "api_error", "api_error": details})
-            for remaining in selected[index + 1:]:
-                statuses[remaining["conversation_id"]] = "not_attempted"
-                reviews.append({"conversation_id": remaining["conversation_id"], "reason": "not_attempted"})
+            reviews.append({"conversation_id": conversation_id, "reason": "api_error", "api_error": error_details})
             failed = True
-            break
+            continue
+        if matches is None:
+            statuses[conversation_id] = "review_required"
+            reviews.append({"conversation_id": conversation_id, "reason": "uncertain"})
+            continue
+        statuses[conversation_id] = "classified"
+        for category_id, confidence in matches:
+            associations.append({
+                "conversation_id": conversation_id,
+                "category_id": category_id,
+                "taxonomy_version": categories[category_id].get("taxonomy_version", ""),
+                "classification_method": "openai_decisions",
+                "confidence": confidence,
+                "model": MODEL,
+                "prompt_version": PROMPT_VERSION,
+                "classified_at": run_time,
+            })
 
     # Use the Silver input name as the stable batch key. Re-running classification
     # for the same Silver batch replaces its Gold files instead of creating another set.
