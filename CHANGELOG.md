@@ -17,3 +17,5 @@
 - **Oct 20** — Added an adjustable top-N notebook view of distinct category counts calculated directly from the three Gold tables; zero-count categories are hidden.
 - **Oct 22** — Set the classifier to evaluate all 332 IWAs plus `OTHER` in one Decisions API request per conversation; made identical WildChat Bronze requests overwrite their same-day file; updated the notebook and architecture/data docs.
 - **Oct 23** — Changed WildChat Bronze ingestion to bulk-download the published Parquet shards and consolidate them into one full Bronze Parquet file; Silver streams the batch into one Parquet file, and Gold writes the full conversation table plus category tables with same-batch overwrite.
+- **Oct 24** — Added reproducible seeded random sampling (up to 1,000 conversations), bounded parallel Decisions API classification (5 workers by default), and one-based ranks in the Step 8 category view.
+- **Oct 28** — Changed conversation identity to the first WildChat `turn_identifier`; retained duplicate-prone `conversation_hash` as a non-key and documented last-turn timestamp semantics.
