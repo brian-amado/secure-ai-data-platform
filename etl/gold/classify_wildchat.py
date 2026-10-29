@@ -6,10 +6,12 @@ import argparse
 import csv
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
 import random
+import sqlite3
 import sys
 from threading import local
 from typing import Any
@@ -27,6 +29,7 @@ MAX_CLASSIFICATION_WORKERS = 10
 IWA_THRESHOLD = 0.5
 OTHER_THRESHOLD = 0.8
 PROMPT_VERSION = "1.1"
+BILLING_ERROR_CODES = {"insufficient_quota", "billing_hard_limit_reached", "billing_not_active", "quota_exceeded"}
 
 CONVERSATION_SCHEMA = pa.schema([
     ("conversation_id", pa.string()), ("conversation_hash", pa.string()),
@@ -225,6 +228,155 @@ def write_csv(path: Path, rows: list[dict[str, Any]], fields: list[str]) -> None
         writer.writerows(rows)
 
 
+def checkpoint_fingerprint(
+    source: Path, catalog_path: Path, total_rows: int, limit: int, seed: int, model: str
+) -> str:
+    """Identify a repeatable classification run without hashing the large Parquet file."""
+    source_stat = source.stat()
+    catalog_hash = hashlib.sha256(catalog_path.read_bytes()).hexdigest()
+    identity = {
+        "source": str(source.resolve()),
+        "source_size": source_stat.st_size,
+        "source_mtime_ns": source_stat.st_mtime_ns,
+        "total_rows": total_rows,
+        "catalog_sha256": catalog_hash,
+        "limit": limit,
+        "seed": seed,
+        "model": model,
+        "prompt_version": PROMPT_VERSION,
+    }
+    return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+
+
+def open_checkpoint(path: Path, fingerprint: str) -> sqlite3.Connection:
+    """Open a local, conversation-text-free checkpoint for this exact run configuration."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(path)
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS run_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+    )
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS results ("
+        "conversation_id TEXT PRIMARY KEY, status TEXT NOT NULL, matches_json TEXT, updated_at TEXT NOT NULL)"
+    )
+    existing = dict(connection.execute("SELECT key, value FROM run_metadata"))
+    if existing and existing.get("fingerprint") != fingerprint:
+        connection.close()
+        raise ValueError(f"Checkpoint configuration does not match: {path}")
+    connection.execute(
+        "INSERT OR REPLACE INTO run_metadata(key, value) VALUES ('fingerprint', ?)", (fingerprint,)
+    )
+    connection.commit()
+    return connection
+
+
+def checkpoint_results(connection: sqlite3.Connection) -> dict[str, tuple[str, list[tuple[str, float]] | None]]:
+    return {
+        conversation_id: (status, json.loads(matches_json) if matches_json else None)
+        for conversation_id, status, matches_json in connection.execute(
+            "SELECT conversation_id, status, matches_json FROM results"
+        )
+    }
+
+
+def save_checkpoint_result(
+    connection: sqlite3.Connection,
+    conversation_id: str,
+    status: str,
+    matches: list[tuple[str, float]] | None,
+) -> None:
+    connection.execute(
+        "INSERT OR REPLACE INTO results VALUES (?, ?, ?, ?)",
+        (conversation_id, status, json.dumps(matches) if matches is not None else None,
+         datetime.now(timezone.utc).isoformat()),
+    )
+    connection.commit()
+
+
+def safe_error_details(error: Exception) -> tuple[dict[str, Any], bool]:
+    """Return non-sensitive diagnostics and whether the error indicates exhausted billing/quota."""
+    body = getattr(error, "body", None)
+    nested_error = body.get("error", {}) if isinstance(body, dict) else {}
+    code = getattr(error, "code", None) or (
+        nested_error.get("code") if isinstance(nested_error, dict) else None
+    )
+    status_code = getattr(error, "status_code", None)
+    message = " ".join((str(error), str(body or ""))).lower()
+    billing = code in BILLING_ERROR_CODES or any(
+        phrase in message for phrase in ("insufficient_quota", "credit balance", "billing hard limit", "billing_not_active")
+    ) or ("quota" in message and status_code in (402, 429))
+    details = {key: value for key, value in {
+        "error_type": type(error).__name__,
+        "status_code": status_code,
+        "error_code": code,
+        "request_id": getattr(error, "request_id", None),
+        "billing_or_quota_exhausted": billing,
+    }.items() if value is not None}
+    return details, billing
+
+
+def seed_checkpoint_from_previous_gold(
+    connection: sqlite3.Connection,
+    selected_ids: set[str],
+    output_dir: Path,
+    stem: str,
+    categories: dict[str, dict[str, str]],
+) -> int:
+    """Reuse compatible completed rows from an older partial Gold output on first resume."""
+    conversation_path = output_dir / f"conversations_{stem}.parquet"
+    association_path = output_dir / f"conversation_categories_{stem}.parquet"
+    category_path = output_dir / f"categories_{stem}.parquet"
+    if not all(path.is_file() for path in (conversation_path, association_path, category_path)):
+        return 0
+    try:
+        category_columns = [
+            "category_id", "taxonomy_version", "category_type", "category_name", "definition",
+            "parent_gwa_id", "parent_gwa_name", "taxonomy_source",
+        ]
+        previous_categories = pq.read_table(category_path, columns=category_columns).to_pylist()
+        current_categories = {
+            category_id: tuple(row.get(column, "") for column in category_columns[1:])
+            for category_id, row in categories.items()
+        }
+        prior_category_map = {
+            row["category_id"]: tuple(row.get(column, "") or "" for column in category_columns[1:])
+            for row in previous_categories
+        }
+        if prior_category_map != current_categories:
+            return 0
+        associations = pq.read_table(association_path).to_pylist()
+        prior_conversations = pq.read_table(
+            conversation_path, columns=["conversation_id", "classification_status"]
+        ).to_pylist()
+    except (OSError, pa.ArrowException, KeyError):
+        return 0
+
+    matches_by_id: dict[str, list[tuple[str, float]]] = {}
+    compatible_ids: set[str] = set()
+    for row in associations:
+        if row.get("model") != MODEL or row.get("prompt_version") != PROMPT_VERSION:
+            return 0
+        conversation_id = row["conversation_id"]
+        if conversation_id in selected_ids and row["category_id"] in categories:
+            compatible_ids.add(conversation_id)
+            matches_by_id.setdefault(conversation_id, []).append(
+                (row["category_id"], float(row["confidence"]))
+            )
+    imported = 0
+    for row in prior_conversations:
+        conversation_id = row["conversation_id"]
+        status = row["classification_status"]
+        if conversation_id not in selected_ids:
+            continue
+        if status == "classified" and conversation_id in compatible_ids:
+            save_checkpoint_result(connection, conversation_id, status, matches_by_id[conversation_id])
+            imported += 1
+        elif status == "review_required":
+            save_checkpoint_result(connection, conversation_id, status, None)
+            imported += 1
+    return imported
+
+
 def main() -> int:
     args = parse_args()
     if not 1 <= args.limit <= MAX_CLASSIFICATION_SAMPLE:
@@ -235,9 +387,6 @@ def main() -> int:
         return 2
     if args.model != MODEL:
         print(f"The Decisions API currently supports only {MODEL}.", file=sys.stderr)
-        return 2
-    if args.execute and not os.getenv("OPENAI_API_KEY"):
-        print("OPENAI_API_KEY is not set.", file=sys.stderr)
         return 2
     try:
         categories = load_categories(args.categories)
@@ -251,90 +400,8 @@ def main() -> int:
     if not args.execute:
         print("Dry run: no API request made. Add --execute to classify.")
         return 0
-    try:
-        from openai import OpenAI
-    except ImportError:
-        print("Install dependencies with: pip install -r requirements-dev.txt", file=sys.stderr)
-        return 2
 
-    selected = conversations[:args.limit]
-    associations: list[dict[str, Any]] = []
-    reviews: list[dict[str, Any]] = []
-    statuses = {row["conversation_id"]: "pending" for row in conversations}
-    run_time = datetime.now(timezone.utc).isoformat()
-    worker_state = local()
-
-    def classify_one(index: int, conversation: dict[str, Any]) -> tuple[int, list[tuple[str, float]] | None, dict[str, Any] | None]:
-        """Run one conversation request with a client dedicated to this worker thread."""
-        try:
-            client = getattr(worker_state, "client", None)
-            if client is None:
-                client = OpenAI()
-                worker_state.client = client
-            return index, classify(client, conversation, categories), None
-        except Exception as error:
-            details = {key: value for key, value in {
-                "error_type": type(error).__name__,
-                "status_code": getattr(error, "status_code", None),
-                "error_code": getattr(error, "code", None),
-                "request_id": getattr(error, "request_id", None),
-            }.items() if value is not None}
-            return index, None, details
-
-    # Keep concurrency bounded: each task sends one paid Decisions API request.
-    results: list[tuple[list[tuple[str, float]] | None, dict[str, Any] | None] | None] = [None] * len(selected)
-    with ThreadPoolExecutor(max_workers=args.workers) as executor:
-        futures = {
-            executor.submit(classify_one, index, conversation): index
-            for index, conversation in enumerate(selected)
-        }
-        stop_queued_work = False
-        for future in as_completed(futures):
-            index = futures[future]
-            if future.cancelled():
-                continue
-            result_index, matches, error_details = future.result()
-            results[result_index] = (matches, error_details)
-            if error_details and not stop_queued_work:
-                stop_queued_work = True
-                for queued in futures:
-                    if queued is not future:
-                        queued.cancel()
-
-    failed = False
-    for index, conversation in enumerate(selected):
-        conversation_id = conversation["conversation_id"]
-        result = results[index]
-        if result is None:
-            statuses[conversation_id] = "not_attempted"
-            reviews.append({"conversation_id": conversation_id, "reason": "not_attempted"})
-            continue
-        matches, error_details = result
-        if error_details is not None:
-            print(f"Decisions API failed: {error_details}", file=sys.stderr)
-            statuses[conversation_id] = "failed"
-            reviews.append({"conversation_id": conversation_id, "reason": "api_error", "api_error": error_details})
-            failed = True
-            continue
-        if matches is None:
-            statuses[conversation_id] = "review_required"
-            reviews.append({"conversation_id": conversation_id, "reason": "uncertain"})
-            continue
-        statuses[conversation_id] = "classified"
-        for category_id, confidence in matches:
-            associations.append({
-                "conversation_id": conversation_id,
-                "category_id": category_id,
-                "taxonomy_version": categories[category_id].get("taxonomy_version", ""),
-                "classification_method": "openai_decisions",
-                "confidence": confidence,
-                "model": MODEL,
-                "prompt_version": PROMPT_VERSION,
-                "classified_at": run_time,
-            })
-
-    # Use the Silver input name as the stable batch key. Re-running classification
-    # for the same Silver batch replaces its Gold files instead of creating another set.
+    # Silver's filename is the stable batch key; reruns replace the same Gold exports.
     stem = args.silver_file.stem.removeprefix("silver_")
     categories_out = [{
         "category_id": category_id,
@@ -354,25 +421,149 @@ def main() -> int:
         "categories_csv": args.export_dir / f"categories_{stem}.csv",
         "conversation_categories_csv": args.export_dir / f"conversation_categories_{stem}.csv",
     }
-    conversation_count = write_conversations(
-        args.silver_file, paths["conversations"], paths["conversations_csv"], statuses
+
+    fingerprint = checkpoint_fingerprint(
+        args.silver_file, args.categories, total_rows, args.limit, args.sample_seed, args.model
     )
-    write_parquet(paths["categories"], categories_out, CATEGORY_SCHEMA)
-    write_parquet(paths["conversation_categories"], associations, ASSOCIATION_SCHEMA)
-    write_csv(paths["categories_csv"], categories_out, CATEGORY_SCHEMA.names)
-    write_association_csv(paths["conversation_categories_csv"], associations, categories)
-    review_path = args.output_dir / f"classification_reviews_{stem}.jsonl"
-    with review_path.open("w", encoding="utf-8") as file:
-        for review in reviews:
-            file.write(json.dumps(review, ensure_ascii=False) + "\n")
-    for name, path in paths.items():
-        rows = len(associations) if name.startswith("conversation_categories") else (
-            len(categories_out) if name.startswith("categories") else conversation_count
+    checkpoint_path = args.output_dir / "checkpoints" / (
+        f"classification_{stem}_seed{args.sample_seed}_limit{args.limit}_{fingerprint[:12]}.sqlite3"
+    )
+    selected = conversations[:args.limit]
+    selected_ids = {row["conversation_id"] for row in selected}
+    statuses = {row["conversation_id"]: "pending" for row in conversations}
+    associations: list[dict[str, Any]] = []
+    reviews: list[dict[str, Any]] = []
+    errors: dict[str, tuple[dict[str, Any], bool]] = {}
+    billing_error = False
+    run_time = datetime.now(timezone.utc).isoformat()
+
+    try:
+        checkpoint = open_checkpoint(checkpoint_path, fingerprint)
+    except (OSError, sqlite3.Error, ValueError) as error:
+        print(f"Checkpoint error: {error}", file=sys.stderr)
+        return 2
+
+    try:
+        saved = checkpoint_results(checkpoint)
+        if not saved:
+            imported = seed_checkpoint_from_previous_gold(
+                checkpoint, selected_ids, args.output_dir, stem, categories
+            )
+            if imported:
+                print(f"Reused {imported} completed conversation(s) from the prior partial Gold output.")
+                saved = checkpoint_results(checkpoint)
+        pending = [row for row in selected if row["conversation_id"] not in saved]
+        print(f"Checkpoint: {checkpoint_path}; already complete: {len(saved)}; remaining: {len(pending)}.")
+
+        if pending:
+            if not os.getenv("OPENAI_API_KEY"):
+                print("OPENAI_API_KEY is not set; completed work remains saved in the checkpoint.", file=sys.stderr)
+                return 2
+            try:
+                from openai import OpenAI
+            except ImportError:
+                print("Install dependencies with: pip install -r requirements-dev.txt", file=sys.stderr)
+                return 2
+
+            worker_state = local()
+
+            def classify_one(index: int, conversation: dict[str, Any]) -> tuple[
+                int, list[tuple[str, float]] | None, dict[str, Any] | None, bool
+            ]:
+                """Send one conversation with a client dedicated to its worker thread."""
+                try:
+                    client = getattr(worker_state, "client", None)
+                    if client is None:
+                        client = OpenAI()
+                        worker_state.client = client
+                    return index, classify(client, conversation, categories), None, False
+                except Exception as error:
+                    details, is_billing_error = safe_error_details(error)
+                    return index, None, details, is_billing_error
+
+            # Save each successful response as soon as it returns. If the process stops,
+            # the next run skips these conversations and sends only the unfinished ones.
+            with ThreadPoolExecutor(max_workers=args.workers) as executor:
+                futures = {
+                    executor.submit(classify_one, index, conversation): index
+                    for index, conversation in enumerate(pending)
+                }
+                stop_queue = False
+                for future in as_completed(futures):
+                    if future.cancelled():
+                        continue
+                    index, matches, error_details, is_billing_error = future.result()
+                    conversation_id = pending[index]["conversation_id"]
+                    if error_details is not None:
+                        errors[conversation_id] = (error_details, is_billing_error)
+                        billing_error = billing_error or is_billing_error
+                        if not stop_queue:
+                            stop_queue = True
+                            for queued in futures:
+                                if queued is not future:
+                                    queued.cancel()
+                        continue
+                    result_status = "review_required" if matches is None else "classified"
+                    save_checkpoint_result(checkpoint, conversation_id, result_status, matches)
+
+        saved = checkpoint_results(checkpoint)
+        for conversation in selected:
+            conversation_id = conversation["conversation_id"]
+            if conversation_id in saved:
+                status, matches = saved[conversation_id]
+                statuses[conversation_id] = status
+                if status == "review_required":
+                    reviews.append({"conversation_id": conversation_id, "reason": "uncertain"})
+                else:
+                    for category_id, confidence in (matches or []):
+                        associations.append({
+                            "conversation_id": conversation_id,
+                            "category_id": category_id,
+                            "taxonomy_version": categories[category_id].get("taxonomy_version", ""),
+                            "classification_method": "openai_decisions",
+                            "confidence": confidence,
+                            "model": args.model,
+                            "prompt_version": PROMPT_VERSION,
+                            "classified_at": run_time,
+                        })
+                continue
+            if conversation_id in errors:
+                details, exhausted = errors[conversation_id]
+                statuses[conversation_id] = "failed"
+                reviews.append({"conversation_id": conversation_id, "reason": "api_error", "api_error": details})
+                print(f"Decisions API failed: {details}", file=sys.stderr)
+                if exhausted:
+                    print("Billing/quota is exhausted. No retry was attempted; resolve billing, then rerun with the same sample settings to resume.", file=sys.stderr)
+            else:
+                statuses[conversation_id] = "not_attempted"
+                reviews.append({"conversation_id": conversation_id, "reason": "not_attempted"})
+
+        conversation_count = write_conversations(
+            args.silver_file, paths["conversations"], paths["conversations_csv"], statuses
         )
-        print(f"Gold {name}: {path} ({rows} rows)")
-    print(f"Gold batch: {stem}; classified at {run_time}")
-    print(f"Review queue: {review_path} ({len(reviews)} rows)")
-    return int(failed)
+        write_parquet(paths["categories"], categories_out, CATEGORY_SCHEMA)
+        write_parquet(paths["conversation_categories"], associations, ASSOCIATION_SCHEMA)
+        write_csv(paths["categories_csv"], categories_out, CATEGORY_SCHEMA.names)
+        write_association_csv(paths["conversation_categories_csv"], associations, categories)
+        review_path = args.output_dir / f"classification_reviews_{stem}.jsonl"
+        with review_path.open("w", encoding="utf-8") as file:
+            for review in reviews:
+                file.write(json.dumps(review, ensure_ascii=False) + "\n")
+        for name, path in paths.items():
+            rows = len(associations) if name.startswith("conversation_categories") else (
+                len(categories_out) if name.startswith("categories") else conversation_count
+            )
+            print(f"Gold {name}: {path} ({rows} rows)")
+        print(f"Gold batch: {stem}; output updated at {run_time}")
+        print(f"Review queue: {review_path} ({len(reviews)} rows)")
+        if billing_error:
+            return 3
+        if errors:
+            print("Classification stopped after an API error. Rerun the same settings to resume only unfinished conversations.", file=sys.stderr)
+            return 1
+        return 0
+    finally:
+        checkpoint.close()
 
 
 if __name__ == "__main__":
