@@ -13,3 +13,6 @@ __pycache__/
 /data/silver/
 /data/gold/
 /data/exports/
+
+# Personal Power BI planning notes (keep local)
+/reports/powerbi/REPORT_BRIEF.md
