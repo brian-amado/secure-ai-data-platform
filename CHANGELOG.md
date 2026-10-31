@@ -20,3 +20,4 @@
 - **Oct 24** — Added reproducible seeded random sampling (up to 1,000 conversations), bounded parallel Decisions API classification (5 workers by default), and one-based ranks in the Step 8 category view.
 - **Oct 28** — Changed conversation identity to the first WildChat `turn_identifier`; retained duplicate-prone `conversation_hash` as a non-key and documented last-turn timestamp semantics.
 - **Oct 29** — Added local per-conversation checkpoints to Gold classification so interrupted samples resume without repeating completed API calls; billing/quota errors stop the run without retrying.
+- **Oct 30** — Added labeled screenshots of the Power BI executive overview, activity trend, and semantic model, with model guidance and interpretation notes.
