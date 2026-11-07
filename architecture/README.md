@@ -1,30 +1,27 @@
-# Architecture Overview
+# Architecture and Data Model
 
-The system architecture diagram and the initial conversation-category analytics model are both shown here. The full architecture design notes remain in [system-architecture.md](system-architecture.md).
+The diagram shows the implemented local pipeline and planned consumer path. Azure services and deployment remain future work. See [system-architecture.md](system-architecture.md) for design notes.
 
-## Initial System Architecture
+## System flow
 
-This initial logical design keeps the data pipeline central. The AI/RAG path is a future consumer; Azure service choices and physical storage layout remain open.
-
-```mermaid
+~~~mermaid
 flowchart TD
-    API[External data API] --> Ingest["Ingestion script: fetch API data"]
-    CSV[Raw CSV upload] --> Bronze
-    Ingest --> Bronze["BRONZE<br/>Raw source data, preserved as received"]
-    Bronze --> Silver["SILVER<br/>Validate and standardize; derive conversation_id from first turn_identifier; retain conversation_hash"]
-    Silver --> Gold["GOLD<br/>One row per conversation instance; source timestamp is last-turn time; category bridge uses conversation_id"]
-    Gold --> Consumers[Analytics and downstream products]
+    WildChat["WildChat published Parquet dataset"] --> WB["BRONZE<br/>Consolidated source snapshot"]
+    ONET["O*NET 31.0 crosswalk CSV"] --> OB["BRONZE<br/>Source taxonomy file"]
+    WB --> WS["SILVER<br/>Validated, minimized conversations"]
+    OB --> OS["SILVER<br/>One row per IWA"]
+    WS --> GOLD["GOLD<br/>Conversation, category, and association tables"]
+    OS --> GOLD
+    GOLD --> PBI["Power BI aggregate reporting"]
+    GOLD -. Future .-> AIRAG["Future: approved content → permission-aware AI/RAG → cited answers"]
+    Controls["Security across the platform<br/>Least privilege · protected credentials · encryption · audit and monitoring"]
+~~~
 
-    Gold -. Future .-> AIRAG["Future: approved content → permission-aware AI/RAG → cited answers"]
+## Conversation-category model
 
-    Controls["SECURITY ACROSS THE PLATFORM<br/>Identity and least privilege · credentials outside code · encryption and network boundaries · audit logs and monitoring"]
-```
+The reporting question is: **How many distinct conversations involved each category?** A conversation can involve several activities, so the relationship is many-to-many.
 
-## Initial conversation-category analytics model
-
-The first reporting goal is to answer: **How many distinct conversations involved each category?** A conversation may involve several categories, so the relationship is many-to-many.
-
-```mermaid
+~~~mermaid
 erDiagram
     CONVERSATION ||--o{ CONVERSATION_CATEGORY : has
     CATEGORY ||--o{ CONVERSATION_CATEGORY : labels
@@ -54,21 +51,20 @@ erDiagram
         string classification_method
         float confidence
     }
-```
+~~~
 
-### Table roles
+- **Conversation:** one row per source instance. <code>conversation_id</code> derives from the first turn’s <code>turn_identifier</code> and is unique across this snapshot’s 837,989 conversation rows. <code>conversation_hash</code> can repeat and is not a key. The source timestamp is the last-turn time.
+- **Category:** one row per category and taxonomy version. O*NET contributes unique IWAs with parent GWA metadata; <code>OTHER</code> is project-defined.
+- **Conversation category:** one row per unique conversation/category assignment, keyed by <code>(conversation_id, category_id, taxonomy_version)</code>. Confidence is a model-reported signal, not a calibrated probability.
 
-- **Conversation** — one row per source conversation occurrence. `conversation_id` is the first turn’s `turn_identifier`. Although that field identifies individual turns, its first-turn value is unique for each conversation row in this WildChat snapshot. Keep `conversation_hash` separately as a non-unique fingerprint of content; it is not a key. Preserve the dataset’s conversation-level `timestamp`, which is the last-turn time, and label report trends as date of last activity. Keep report-ready metadata here, not message text or network identifiers. `classification_status` can distinguish pending, classified, unclassified, or review-needed records.
-- **Category** — one row per category in a taxonomy version, including its definition and source. The taxonomy version keeps reports reproducible when the category set changes.
-- **Conversation category** — one row for each unique conversation-category assignment. Its composite key is `(conversation_id, category_id, taxonomy_version)`. `classification_method` can record human, rules-based, or model assignment; `confidence` is optional and should only be used when meaningful for that method.
+Count distinct conversation IDs per category, not bridge rows. A conversation with several categories contributes once to each; counts can overlap and sum to more than the conversation total. This measures category presence per conversation, not request frequency.
 
-For example, if conversation C1 includes coding and writing, it has two association rows. Count distinct `conversation_id` values per category. Category counts can overlap, so adding them may exceed the total number of conversations. This model counts whether a category appears in a conversation; it does **not** count how many times that kind of request occurred. Request-level counts would need a separate, finer-grained model.
+## Current pipeline
 
-Silver stores one validated conversation per Parquet row, with messages nested as a list. Bronze preserves each raw API response as a JSONL record; notebook Step 2 downloads all 100-row pages with two concurrent requests by default, then consolidates the pages into one daily Bronze batch file. Temporary page checkpoints allow recovery after interruption and are removed after successful consolidation. A same-day rerun replaces that batch file. Silver transforms the complete Bronze batch into one Parquet file. Gold writes one full conversation table and separate category and conversation-category tables for the Silver batch; reruns replace those outputs, and association records retain their classification time in `classified_at`. Notebook Step 7 uses a reproducible 1,000-conversation random sample by default in the current workflow; the remaining Gold conversation rows stay pending. Gold also writes CSV copies of all three tables under `data/exports/` for convenient inspection; CSVs are derived views, not another data layer. The notebook can calculate distinct classified-conversation counts by category directly from these Gold tables and display an adjustable top-N view without persisting a duplicate summary table. Pending, failed, and unresolved conversations are excluded; the view does not read conversation text or review records. The classifier uses OpenAI's Decisions API with 333 independent predicate questions (332 IWAs plus `OTHER`) in one request per conversation. Each association stores the API's predicate probability as `confidence`; treat it as a model-reported signal, not a calibrated probability.
+- **Bronze:** bulk-download WildChat’s published Parquet shards into one local Parquet batch. Preserve the O*NET crosswalk as its source CSV. A same-day WildChat rerun replaces that batch; historical source snapshots are not retained.
+- **Silver:** validate and minimize WildChat records into one Parquet file, retaining nested messages for classification. Reduce the O*NET DWA-to-IWA-to-GWA crosswalk to one row per unique IWA.
+- **Gold:** write the full conversation table plus category and conversation-category tables for the Silver batch, as Parquet and CSV. The notebook classifies a reproducible random sample of up to 1,000 conversations by default; remaining rows stay pending. Re-running the batch replaces its outputs.
+- **Classification:** evaluate 332 IWAs and <code>OTHER</code> in one OpenAI Decisions API request per conversation, using bounded parallelism. Completed results are checkpointed locally in SQLite for compatible resume. Failed or unresolved records are kept separate from <code>OTHER</code>.
+- **Reporting:** Power BI uses the three Gold CSVs. Report visuals and limitations are documented in [reports/powerbi](../reports/powerbi/README.md).
 
-## Classification taxonomy source
-
-The work-related classification options are the unique **Intermediate Work Activities (IWAs)** from the [O*NET 31.0 GWA-to-IWA-to-DWA crosswalk](https://www.onetcenter.org/dictionary/31.0/csv/gwas_to_iwas_to_dwas.html). The source file has six columns and 2,087 crosswalk rows; it maps each Detailed Work Activity to one IWA and its General Work Activity. The Silver catalog omits DWA-level detail and keeps one row per unique IWA identifier, with its name and parent GWA metadata.
-The work-related classification options are the unique **Intermediate Work Activities (IWAs)** from the [O*NET 31.0 GWA-to-IWA-to-DWA crosswalk](https://www.onetcenter.org/dictionary/31.0/csv/gwas_to_iwas_to_dwas.html). The source file has six columns and 2,087 crosswalk rows; it maps each Detailed Work Activity to one IWA and its General Work Activity. The Silver catalog omits DWA-level detail and keeps one row per unique IWA identifier, with its name and parent GWA metadata.
-
-`OTHER` is a project-defined category for non-work-related conversations; it is not part of O*NET. A conversation can receive multiple IWA categories when it involves multiple work activities. A non-work conversation receives `OTHER`. Unclear or failed classifications should be marked for review instead of automatically mapped to `OTHER`.
+The taxonomy is the unique Intermediate Work Activities (IWAs) from the [O*NET 31.0 GWA-to-IWA-to-DWA crosswalk](https://www.onetcenter.org/dictionary/31.0/csv/gwas_to_iwas_to_dwas.html). Its 2,087 rows include DWA-level mappings; Silver removes DWA detail and retains each unique IWA and parent GWA. <code>OTHER</code> represents non-work conversations and is not part of O*NET.

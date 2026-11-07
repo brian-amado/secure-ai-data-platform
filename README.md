@@ -1,45 +1,60 @@
 # Secure AI & Data Platform
 
-A portfolio project for building a secure enterprise data and AI platform on Azure.
+A portfolio prototype of a privacy-conscious data pipeline that categorizes public AI conversations by O*NET work activity and presents aggregate results in Power BI.
 
-The project will grow through documented steps across data ingestion and processing, AI and retrieval, Azure infrastructure, and security controls.
+> **Scope:** This project uses public WildChat research data.  The report reflects a partial sample, and category assignments are model estimates rather than verified ground truth.
 
-## Problem Statement
+## What it demonstrates
 
-Organizations are adopting generative AI, but leaders often lack a clear, privacy-conscious view of the kinds of work it supports. Conversation data is messy, sensitive, and difficult to summarize consistently, while individual messages may contain details that do not belong in routine reporting.
+- A local Bronze/Silver/Gold pipeline for WildChat conversations and O*NET taxonomy data.
+- A conversation-level model with separate conversation, category, and conversation-category tables. One conversation can map to multiple activities.
+- Reproducible sample selection and resumable classification through the OpenAI Decisions API.
+- Executive and activity-trend views in Power BI, built from the Gold CSV exports.
 
-This project uses the public WildChat dataset to demonstrate a secure data pipeline that validates and minimizes conversation records, classifies conversations into work-activity categories, and produces aggregate usage data. The first reports focus on how many conversations involve each category; a conversation may map to multiple categories. The platform is designed to grow toward Azure security controls and a permission-aware, citation-grounded interface for asking questions about those reports. Raw message text is used for classification, but excluded from the reporting tables.
+See the [architecture and data model](architecture/README.md), [dataset notes](data/README.md), and [Power BI report notes](reports/powerbi/README.md).
 
+## Report preview
 
-## Repository Map
+### Executive overview
 
-- `architecture/` — system and data-flow design
-- `infrastructure/terraform/` — infrastructure as code
-- `etl/bronze/` — source ingestion and raw landing; `fetch_wildchat.py` bulk-downloads and consolidates the published WildChat Parquet shards
-- `etl/silver/` — validation, minimization, and standardization
-- `etl/gold/` — classification and report-ready tables
-- `ai/` — AI and retrieval components
-- `security/` — identity and security controls
-- `monitoring/` — operational visibility
-- `tests/` — automated checks
+![Power BI executive overview](reports/powerbi/screenshots/executive-overview.png)
 
+### Activity mix and trend
 
-## Current Status
+![Power BI activity mix and trend](reports/powerbi/screenshots/activity-mix-and-trend.png)
 
-Local prototype in progress: WildChat Bronze ingestion, Silver Parquet preparation, and Gold conversation-category modeling. Azure deployment and the reporting/RAG experience are future steps. See [CHANGELOG.md](CHANGELOG.md) for progress.
+The [semantic model screenshot](reports/powerbi/screenshots/semantic-model.png) is documented with the report notes.
 
-## Local Development
+## Data model
 
-Requires Python 3.13. From the repository root, create and activate the virtual environment:
+- **Conversations:** one row per source conversation instance. The key is derived from the first turn’s <code>turn_identifier</code>; the source timestamp denotes the last turn.
+- **Categories:** O*NET Intermediate Work Activities (IWAs), plus the project-defined <code>OTHER</code> category.
+- **Conversation categories:** one row per conversation/category assignment, forming the many-to-many bridge.
 
-```bash
-python3.13 -m venv .venv
-source .venv/bin/activate
-```
+Category counts are distinct conversation counts. They overlap when a conversation has several labels, so category totals can exceed the classified-conversation total.
 
-Install the notebook tools and launch the walkthrough from the repository root:
+## Data handling
 
-```bash
-python -m pip install -r requirements-dev.txt
-python -m notebook notebooks/wildchat_pipeline.ipynb
-```
+Conversation text is used for classification and excluded from report-ready Gold tables. Local source, working, and export data are excluded from Git. See [data handling notes](data/README.md) before downloading or processing the dataset.
+
+## Repository map
+
+- <code>architecture/</code> — system flow and analytics model
+- <code>data/</code> — dataset profile and local data conventions
+- <code>etl/bronze/</code>, <code>etl/silver/</code>, <code>etl/gold/</code> — ingestion, validation, classification, and reporting tables
+- <code>notebooks/</code> — step-by-step local pipeline walkthrough
+- <code>reports/powerbi/</code> — report screenshots and interpretation notes
+- <code>infrastructure/terraform/</code>, <code>security/</code>, <code>monitoring/</code> — future platform capabilities
+
+## Run locally
+
+Requires Python 3.13. From the repository root:
+
+    python3.13 -m venv .venv
+    source .venv/bin/activate
+    python -m pip install -r requirements-dev.txt
+    python -m notebook notebooks/wildchat_pipeline.ipynb
+
+The notebook downloads the source data and walks through Bronze, Silver, and Gold. Classification defaults to a reproducible 1,000-conversation sample, prompts for an OpenAI API key, and sends the selected conversation text to the API. API usage will incur charges; adjust the sample size in Step 7 before classification.
+
+Azure deployment and the permission-aware RAG experience remain future work. This repository demonstrates a local data and reporting prototype.
