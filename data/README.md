@@ -1,44 +1,37 @@
-# Dataset source profile
+# Dataset and Local Data Notes
 
-## Source
+## WildChat
 
-- Name: WildChat-1M
-- Publisher: Allen Institute for AI (AI2)
-- Location: https://huggingface.co/datasets/allenai/WildChat-1M
-- Format: Parquet
-- License listed by publisher: ODC-BY
-- Dataset page reports approximately 838,000 rows in the train split (checked 2026-10-05)
+- **Dataset:** [WildChat-1M](https://huggingface.co/datasets/allenai/WildChat-1M)
+- **Publisher:** Allen Institute for AI (AI2)
+- **Format:** Parquet
+- **Publisher-listed license:** ODC-BY
+- **Snapshot:** train split, approximately 838,000 conversation rows
 
-## Purpose
+WildChat is public research data, not enterprise telemetry. It has no dependable employee, team, or organization identifiers and does not provide token or spend measures.
 
-Use the dataset to develop a pipeline that can categorize AI usage, report aggregate usage, and support a future RAG interface for questions about those reports.
+## O*NET taxonomy
 
-To pull usage catgorization/taxonomy.
+- **Source:** [O*NET 31.0 GWAs to IWAs to DWAs](https://www.onetcenter.org/dictionary/31.0/csv/gwas_to_iwas_to_dwas.html)
+- **Bronze:** source crosswalk CSV under <code>data/bronze/onet/31.0/</code>
+- **Silver:** one row per unique IWA with its name and parent GWA metadata; <code>OTHER</code> is a project-defined category
 
-## Initial development scope
+The source crosswalk has 2,087 rows because it includes DWA-level mappings. The classifier catalog deduplicates to 332 IWAs plus <code>OTHER</code>.
 
-- Bronze ingests the full published snapshot; keep classification samples small while validating costs and category quality.
-- Keep local samples under `data/bronze/`, `data/silver/`, and `data/gold/`; these data folders are excluded from Git. CSV inspection exports for all three Gold tables are under the ignored `data/exports/` directory.
-- Before processing, review fields and decide which are needed.
-- WildChat Bronze is one consolidated Parquet file per UTC-day run. Source shards are downloaded through the Hugging Face Hub cache and combined in batches.
-- Gold filenames use the Silver input batch name, so rerunning classification for the same Silver file overwrites its three Parquet tables, three CSV exports, and review JSONL. Association rows retain the exact classification time in `classified_at`.
-- Notebook Step 2 bulk-downloads the published WildChat Parquet shards through the Hugging Face Hub client and consolidates them into one full Bronze Parquet file. The Hub client uses concurrent, resumable shard downloads. A same-day rerun replaces the Bronze batch file.
-- From the repository root, run `python etl/bronze/fetch_wildchat.py` to download and consolidate the train split.
-- Silver transforms the complete Bronze batch into one Parquet file, streaming records to avoid loading the full dataset into memory. Gold writes one full conversation table plus the category and conversation-category tables for that Silver batch. Notebook Step 7 uses a reproducible 1,000-conversation random sample by default in the current workflow; the rest are marked pending.
+## Local data flow
 
-## Data handling notes
+- WildChat Bronze bulk-downloads the published Parquet shards and consolidates them into one local Parquet batch.
+- WildChat Silver validates and minimizes conversations, retaining nested message content for classification while omitting fields such as hashed IP, request headers, country, and state.
+- Gold writes three tables—<code>conversations</code>, <code>categories</code>, and <code>conversation_categories</code>—as Parquet and as CSV inspection exports under <code>data/exports/</code>.
+- Notebook Step 7 defaults to a reproducible random sample of 1,000 conversations (seed 42). The full conversation table includes the remaining rows as pending. The current classification run is partial; see [Power BI interpretation notes](../reports/powerbi/README.md).
+- Re-running the same source batch replaces its matching outputs. Classification checkpoints are local SQLite files; review records are separate JSONL files.
 
-The dataset contains public conversation text and metadata that is treated as sensitive, including location, hashed IP, browser headers, timestamps, and moderation labels. 
+Local datasets, checkpoints, review records, and exports are excluded from Git and are not included in a clone. Conversation content can still contain sensitive information; do not publish raw text.
 
-The first version should focus on validated, minimized data and aggregate reports. Raw conversation text is out of scope for the initial RAG index.
+## Local download
 
-## Reference taxonomy: O*NET work activities
+Create the environment and install dependencies as described in the main [README](../README.md). From the repository root, run:
 
-- Source: [O*NET 31.0 GWAs to IWAs to DWAs](https://www.onetcenter.org/dictionary/31.0/csv/gwas_to_iwas_to_dwas.html)
-- Bronze: preserve the downloaded CSV under `data/bronze/onet/31.0/`.
-- Silver: deduplicate the crosswalk to one record per IWA and add the project-defined `OTHER` non-work category under `data/silver/onet/31.0/`.
-- WildChat Silver: write one validated conversation per Parquet row, including nested messages; omit hashed IP, request headers, country, and state.
-- Gold: publish `conversations`, `categories`, and `conversation_categories` as separate Parquet tables, plus CSV inspection copies of each under `data/exports/`. Keep uncertain and failed cases in a separate review JSONL. Outputs are keyed by the Silver input batch, so repeating the same batch replaces those outputs; `classified_at` records when associations were produced. The notebook can calculate distinct classified-conversation counts by category directly from these Gold tables; it omits zero-count categories from the adjustable top-N view and does not persist a duplicate summary table.
-- The data layer folders are excluded from Git.
+    python etl/bronze/fetch_wildchat.py
 
-- WildChat conversation identity: Silver derives `conversation_id` from the first turn’s turn-grain `turn_identifier` (unique for each source conversation row in this snapshot) and retains `conversation_hash` separately because content hashes repeat across conversation occurrences. The source conversation-level `timestamp` is the last-turn time.
+This downloads and consolidates the train split. Keep classification samples small while validating quality and cost.
